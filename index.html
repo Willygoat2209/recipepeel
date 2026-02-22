@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>RecipePeel — Just the Recipe</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍋</text></svg>">
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;1,400&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -424,7 +425,7 @@ function extractPageText(doc) {
   ['script','style','nav','header','footer','aside','.ads','.comments','#comments'].forEach(sel => {
     doc.querySelectorAll(sel).forEach(el => el.remove());
   });
-  return (doc.body?.innerText || doc.body?.textContent || '').replace(/\s+/g, ' ').slice(0, 12000);
+  return (doc.body?.innerText || doc.body?.textContent || '').replace(/\s+/g, ' ').slice(0, 30000);
 }
 
 function renderStructuredRecipe(data, sourceUrl) {
@@ -442,10 +443,31 @@ function renderStructuredRecipe(data, sourceUrl) {
     if (typeof data.recipeInstructions === 'string') {
       instructions = data.recipeInstructions.split(/\n+/).filter(s => s.trim());
     } else if (Array.isArray(data.recipeInstructions)) {
-      instructions = data.recipeInstructions.map(i => typeof i === 'string' ? i : (i.text || i.name || '')).filter(Boolean);
+      for (const item of data.recipeInstructions) {
+        if (typeof item === 'string') {
+          instructions.push(item);
+        } else if (item['@type'] === 'HowToSection' && Array.isArray(item.itemListElement)) {
+          // Section with sub-steps — include section name + all steps
+          if (item.name) instructions.push('── ' + item.name + ' ──');
+          for (const sub of item.itemListElement) {
+            const txt = typeof sub === 'string' ? sub : (sub.text || sub.name || '');
+            if (txt) instructions.push(txt);
+          }
+        } else {
+          const txt = item.text || item.name || '';
+          if (txt) instructions.push(txt);
+        }
+      }
     }
   }
-  const stepsHtml = instructions.map((step, i) => `<li><span class="step-num">${i+1}</span><span>${step}</span></li>`).join('');
+  let stepCounter = 0;
+  const stepsHtml = instructions.map((step) => {
+    if (step.startsWith('── ')) {
+      return `<li style="list-style:none"><span style="display:block;font-size:0.78rem;letter-spacing:0.1em;text-transform:uppercase;color:var(--sage);font-weight:500;padding:8px 0 4px;border-top:1px solid var(--paper);margin-top:8px">${step.replace(/──\s*/g,'').replace(/\s*──$/,'')}</span></li>`;
+    }
+    stepCounter++;
+    return `<li><span class="step-num">${stepCounter}</span><span>${step}</span></li>`;
+  }).join('');
 
   const prepTime = formatTime(data.prepTime);
   const cookTime = formatTime(data.cookTime);
@@ -501,7 +523,7 @@ async function extractWithAI(text, sourceUrl) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
+      max_tokens: 4000,
       messages: [{
         role: "user",
         content: `Extract the recipe from this webpage text. Return ONLY a JSON object with these fields:
@@ -511,10 +533,15 @@ async function extractWithAI(text, sourceUrl) {
   "cookTime": "e.g. 30 minutes",
   "servings": "e.g. 4 servings",
   "ingredients": ["ingredient 1", "ingredient 2", ...],
-  "instructions": ["step 1", "step 2", ...],
+  "instructions": ["step 1 full text", "step 2 full text", ...],
   "notes": "any tips or notes (optional)"
 }
-If a field is not found, omit it. Return only valid JSON, no other text.
+
+CRITICAL RULES:
+- Copy the instructions WORD FOR WORD exactly as written on the page. Do NOT summarize, shorten, or paraphrase any step. Every detail, temperature, time, and technique must be preserved exactly.
+- Copy the ingredients exactly as listed including all quantities and descriptors.
+- If a field is not found, omit it.
+- Return only valid JSON, no other text, no markdown fences.
 
 Page text:
 ${text}`
