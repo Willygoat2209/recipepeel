@@ -445,17 +445,30 @@
 
 <script>
 let currentRecipe = null;
+// In-memory cache so we never lose data on a failed read
+let _favsCache = null;
 
 // ── STORAGE ──
 async function loadFavorites() {
+  // Return cache if we have it
+  if (_favsCache !== null) return _favsCache;
   try {
     const r = await window.storage.get('rp:favs');
-    return r ? JSON.parse(r.value) : [];
-  } catch(e) { return []; }
+    _favsCache = r && r.value ? JSON.parse(r.value) : [];
+  } catch(e) {
+    // Key doesn't exist yet or other error — start with empty array
+    _favsCache = [];
+  }
+  return _favsCache;
 }
 
 async function saveFavorites(favs) {
-  try { await window.storage.set('rp:favs', JSON.stringify(favs)); } catch(e) {}
+  _favsCache = favs; // always update cache immediately
+  try {
+    await window.storage.set('rp:favs', JSON.stringify(favs));
+  } catch(e) {
+    console.warn('Storage save failed, data kept in memory only:', e);
+  }
 }
 
 async function refreshBadge() {
@@ -485,9 +498,13 @@ function closeDrawer() {
 }
 
 async function renderDrawer() {
-  const favs = await loadFavorites();
   const body = document.getElementById('drawerBody');
   const footer = document.getElementById('drawerFooter');
+  body.innerHTML = `<div class="drawer-empty"><div class="ei" style="font-size:1.5rem">⏳</div><p>Loading...</p></div>`;
+
+  const favs = await loadFavorites();
+  console.log('Drawer opened, favorites count:', favs.length, favs);
+
   if (favs.length === 0) {
     body.innerHTML = `<div class="drawer-empty"><div class="ei">🍋</div><p>No saved recipes yet.<br>Hit the ♥ on any recipe to save it here.<br><br>Your recipes sync across all your devices automatically.</p></div>`;
     footer.style.display = 'none';
@@ -552,16 +569,27 @@ function setHeartState(btn, saved) {
 async function handleFavClick() {
   if (!currentRecipe) return;
   const btn = document.getElementById('favBtnMain');
-  btn.classList.add('pop');
-  btn.addEventListener('animationend', () => btn.classList.remove('pop'), { once: true });
 
-  let favs = await loadFavorites();
+  // Pop animation
+  btn.classList.remove('pop');
+  void btn.offsetWidth; // reflow to restart animation
+  btn.classList.add('pop');
+
+  const favs = await loadFavorites();
   const idx = favs.findIndex(f => f.id === currentRecipe.id);
-  let saved;
-  if (idx >= 0) { favs.splice(idx, 1); saved = false; }
-  else { favs.unshift(currentRecipe); saved = true; }
-  await saveFavorites(favs);
-  setHeartState(btn, saved);
+  const alreadySaved = idx >= 0;
+
+  if (alreadySaved) {
+    // UNSAVE: remove it
+    favs.splice(idx, 1);
+    await saveFavorites(favs);
+    setHeartState(btn, false);
+  } else {
+    // SAVE: add it
+    favs.unshift({ ...currentRecipe, savedAt: Date.now() });
+    await saveFavorites(favs);
+    setHeartState(btn, true);
+  }
   await refreshBadge();
 }
 
@@ -824,8 +852,8 @@ function copyRecipe() {
 
 document.getElementById('urlInput').addEventListener('keydown', e => { if (e.key==='Enter') fetchRecipe(); });
 
-// Init
-refreshBadge();
+// Init — pre-load favorites cache so first interactions are fast
+loadFavorites().then(() => refreshBadge());
 </script>
 </body>
 </html>
