@@ -445,30 +445,85 @@
 
 <script>
 let currentRecipe = null;
-// In-memory cache so we never lose data on a failed read
-let _favsCache = null;
+// ── STORAGE (IndexedDB — truly persists across tab closes per device) ──
+const DB_NAME = 'RecipePeel';
+const DB_STORE = 'favorites';
+let _db = null;
 
-// ── STORAGE ──
-async function loadFavorites() {
-  // Return cache if we have it
-  if (_favsCache !== null) return _favsCache;
-  try {
-    const r = await window.storage.get('rp:favs');
-    _favsCache = r && r.value ? JSON.parse(r.value) : [];
-  } catch(e) {
-    // Key doesn't exist yet or other error — start with empty array
-    _favsCache = [];
-  }
-  return _favsCache;
+function openDB() {
+  if (_db) return Promise.resolve(_db);
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = e => {
+      e.target.result.createObjectStore(DB_STORE, { keyPath: 'id' });
+    };
+    req.onsuccess = e => { _db = e.target.result; resolve(_db); };
+    req.onerror = () => reject(req.error);
+  });
 }
 
-async function saveFavorites(favs) {
-  _favsCache = favs; // always update cache immediately
+async function loadFavorites() {
   try {
-    await window.storage.set('rp:favs', JSON.stringify(favs));
-  } catch(e) {
-    console.warn('Storage save failed, data kept in memory only:', e);
-  }
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(DB_STORE, 'readonly');
+      const req = tx.objectStore(DB_STORE).getAll();
+      req.onsuccess = () => {
+        // Sort newest first
+        const sorted = (req.result || []).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+        resolve(sorted);
+      };
+      req.onerror = () => resolve([]);
+    });
+  } catch(e) { return []; }
+}
+
+async function saveFavorite(recipe) {
+  try {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(DB_STORE, 'readwrite');
+      tx.objectStore(DB_STORE).put(recipe);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
+  } catch(e) { return false; }
+}
+
+async function deleteFavoriteById(id) {
+  try {
+    const db = await openDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(DB_STORE, 'readwrite');
+      tx.objectStore(DB_STORE).delete(id);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
+  } catch(e) { return false; }
+}
+
+async function clearAllDB() {
+  try {
+    const db = await openDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(DB_STORE, 'readwrite');
+      tx.objectStore(DB_STORE).clear();
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
+  } catch(e) { return false; }
+}
+
+async function isInDB(id) {
+  try {
+    const db = await openDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(DB_STORE, 'readonly');
+      const req = tx.objectStore(DB_STORE).get(id);
+      req.onsuccess = () => resolve(!!req.result);
+      req.onerror = () => resolve(false);
+    });
+  } catch(e) { return false; }
 }
 
 async function refreshBadge() {
@@ -479,8 +534,7 @@ async function refreshBadge() {
 }
 
 async function isFavorited(id) {
-  const favs = await loadFavorites();
-  return favs.some(f => f.id === id);
+  return isInDB(id);
 }
 
 // ── DRAWER ──
@@ -523,9 +577,7 @@ async function renderDrawer() {
 }
 
 async function delFav(id) {
-  let favs = await loadFavorites();
-  favs = favs.filter(f => f.id !== id);
-  await saveFavorites(favs);
+  await deleteFavoriteById(id);
   await renderDrawer();
   await refreshBadge();
   updateHeartBtn(id, false);
@@ -533,7 +585,7 @@ async function delFav(id) {
 
 async function clearAllFavorites() {
   if (!confirm('Remove all saved recipes?')) return;
-  await saveFavorites([]);
+  await clearAllDB();
   await renderDrawer();
   await refreshBadge();
   const btn = document.getElementById('favBtnMain');
@@ -572,22 +624,16 @@ async function handleFavClick() {
 
   // Pop animation
   btn.classList.remove('pop');
-  void btn.offsetWidth; // reflow to restart animation
+  void btn.offsetWidth;
   btn.classList.add('pop');
 
-  const favs = await loadFavorites();
-  const idx = favs.findIndex(f => f.id === currentRecipe.id);
-  const alreadySaved = idx >= 0;
+  const alreadySaved = await isInDB(currentRecipe.id);
 
   if (alreadySaved) {
-    // UNSAVE: remove it
-    favs.splice(idx, 1);
-    await saveFavorites(favs);
+    await deleteFavoriteById(currentRecipe.id);
     setHeartState(btn, false);
   } else {
-    // SAVE: add it
-    favs.unshift({ ...currentRecipe, savedAt: Date.now() });
-    await saveFavorites(favs);
+    await saveFavorite({ ...currentRecipe, savedAt: Date.now() });
     setHeartState(btn, true);
   }
   await refreshBadge();
@@ -852,8 +898,8 @@ function copyRecipe() {
 
 document.getElementById('urlInput').addEventListener('keydown', e => { if (e.key==='Enter') fetchRecipe(); });
 
-// Init — pre-load favorites cache so first interactions are fast
-loadFavorites().then(() => refreshBadge());
+// Init — open DB and show badge count
+openDB().then(() => refreshBadge()).catch(() => refreshBadge());
 </script>
 </body>
 </html>
